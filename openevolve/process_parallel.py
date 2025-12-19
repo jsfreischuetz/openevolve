@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from openevolve.config import Config
 from openevolve.database import Program, ProgramDatabase
 from openevolve.utils.metrics_utils import safe_numeric_average
+from openevolve.utils.tracking_utils import log_convergence, resolve_log_dir
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,8 @@ def _run_iteration_worker(
                 _worker_llm_ensemble.generate_with_context(
                     system_message=prompt["system"],
                     messages=[{"role": "user", "content": prompt["user"]}],
+                    log_context="evolution",
+                    usage_metadata={"iteration": iteration, "program_id": parent.id},
                 )
             )
         except Exception as e:
@@ -294,11 +297,20 @@ class ProcessParallelController:
         self.shutdown_event = mp.Event()
         self.early_stopping_triggered = False
 
+        # Convergence tracking
+        self.log_dir = str(resolve_log_dir(self.config.log_dir))
+        self._target_metric_name = getattr(self.config, "early_stopping_metric", "combined_score")
+        self._best_convergence_metric: Optional[float] = None
+        self._last_convergence_metric: Optional[float] = None
+
         # Number of worker processes
         self.num_workers = config.evaluator.parallel_evaluations
         self.num_islands = config.database.num_islands
 
         logger.info(f"Initialized process parallel controller with {self.num_workers} workers")
+
+        # Seed convergence tracker from any existing best program
+        self._bootstrap_convergence_state()
 
     def _serialize_config(self, config: Config) -> dict:
         """Serialize config object to a dictionary that can be pickled"""
@@ -404,6 +416,78 @@ class ProcessParallelController:
                 snapshot["artifacts"][pid] = artifacts
 
         return snapshot
+
+    def _extract_target_metric_value(self, metrics: Dict[str, Any]) -> Optional[float]:
+        """Extract the target metric used for convergence tracking."""
+        if not metrics:
+            return None
+
+        raw_value = metrics.get(self._target_metric_name)
+        if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
+            try:
+                return float(raw_value)
+            except (ValueError, TypeError):
+                pass
+
+        numeric_values = [
+            float(v)
+            for v in metrics.values()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        ]
+        if not numeric_values:
+            return None
+
+        return sum(numeric_values) / len(numeric_values)
+
+    def _record_convergence_entry(self, iteration: int, metrics: Dict[str, Any]) -> None:
+        """Append a convergence record for the current iteration."""
+        metric_value = self._extract_target_metric_value(metrics)
+        if metric_value is None:
+            return
+
+        prev_best = self._best_convergence_metric
+        prev_value = self._last_convergence_metric
+
+        if self._best_convergence_metric is None or metric_value > self._best_convergence_metric:
+            self._best_convergence_metric = metric_value
+
+        delta_prev = None if prev_value is None else metric_value - prev_value
+        delta_best = None if prev_best is None else metric_value - prev_best
+        self._last_convergence_metric = metric_value
+
+        log_convergence(
+            iteration=iteration,
+            metric_name=self._target_metric_name,
+            metric_value=metric_value,
+            best_metric=self._best_convergence_metric,
+            delta_from_prev=delta_prev,
+            delta_from_best=delta_best,
+            log_dir=self.log_dir,
+        )
+
+    def _bootstrap_convergence_state(self) -> None:
+        """Initialize convergence tracking from the current database state."""
+        best_program = None
+        if self.database.best_program_id:
+            best_program = self.database.get(self.database.best_program_id)
+
+        if not best_program:
+            best_program = self.database.get_best_program()
+
+        if best_program and best_program.metrics:
+            metric_value = self._extract_target_metric_value(best_program.metrics)
+            if metric_value is not None:
+                self._best_convergence_metric = metric_value
+                self._last_convergence_metric = metric_value
+                log_convergence(
+                    iteration=self.database.last_iteration,
+                    metric_name=self._target_metric_name,
+                    metric_value=metric_value,
+                    best_metric=metric_value,
+                    delta_from_prev=None,
+                    delta_from_best=None,
+                    log_dir=self.log_dir,
+                )
 
     async def run_evolution(
         self,
@@ -576,6 +660,11 @@ class ProcessParallelController:
                             ]
                         )
                         logger.info(f"Metrics: {metrics_str}")
+
+                        # Track convergence of the target metric over iterations
+                        self._record_convergence_entry(
+                            completed_iteration, child_program.metrics
+                        )
 
                         # Check if this is the first program without combined_score
                         if not hasattr(self, "_warned_about_combined_score"):

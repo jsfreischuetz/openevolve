@@ -572,7 +572,10 @@ class Evaluator:
 
             # Get LLM response
             responses = await self.llm_ensemble.generate_all_with_context(
-                prompt["system"], [{"role": "user", "content": prompt["user"]}]
+                prompt["system"],
+                [{"role": "user", "content": prompt["user"]}],
+                log_context="llm_evaluation",
+                usage_metadata={"program_id": program_id},
             )
 
             # Log prompt and response to database

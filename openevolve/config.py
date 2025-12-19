@@ -54,6 +54,8 @@ class LLMModelConfig:
     api_base: str = None
     api_key: Optional[str] = None
     name: str = None
+    # Provider selection (e.g., "openai", "anthropic")
+    model_type: Optional[str] = "openai"
 
     # Custom LLM client
     init_client: Optional[Callable] = None
@@ -170,6 +172,7 @@ class LLMConfig(LLMModelConfig):
             "retry_delay": self.retry_delay,
             "random_seed": self.random_seed,
             "reasoning_effort": self.reasoning_effort,
+            "model_type": getattr(self, "model_type", None),
         }
         self.update_model_params(shared_config)
 
@@ -223,6 +226,7 @@ class LLMConfig(LLMModelConfig):
             "retry_delay": self.retry_delay,
             "random_seed": self.random_seed,
             "reasoning_effort": self.reasoning_effort,
+            "model_type": getattr(self, "model_type", None),
         }
         self.update_model_params(shared_config)
 

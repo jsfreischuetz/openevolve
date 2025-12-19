@@ -189,6 +189,10 @@ class OpenEvolve:
         log_dir = self.config.log_dir or os.path.join(self.output_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
 
+        # Persist resolved log directory for downstream components and workers
+        self.config.log_dir = log_dir
+        os.environ.setdefault("OPENEVOLVE_LOG_DIR", log_dir)
+
         # Set up root logger
         root_logger = logging.getLogger()
         root_logger.setLevel(getattr(logging, self.config.log_level))

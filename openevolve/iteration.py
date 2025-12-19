@@ -80,6 +80,8 @@ async def run_iteration_with_shared_db(
         llm_response = await llm_ensemble.generate_with_context(
             system_message=prompt["system"],
             messages=[{"role": "user", "content": prompt["user"]}],
+            log_context="evolution",
+            usage_metadata={"iteration": iteration, "program_id": parent.id},
         )
 
         # Parse the response

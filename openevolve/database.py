@@ -1000,6 +1000,8 @@ class ProgramDatabase:
                         self.novelty_llm.generate_with_context(
                             system_message=NOVELTY_SYSTEM_MSG,
                             messages=[{"role": "user", "content": user_msg}],
+                            log_context="novelty_judge",
+                            usage_metadata={"program_id": program.id},
                         ),
                     )
                     content: str = future.result()
@@ -1009,6 +1011,8 @@ class ProgramDatabase:
                     self.novelty_llm.generate_with_context(
                         system_message=NOVELTY_SYSTEM_MSG,
                         messages=[{"role": "user", "content": user_msg}],
+                        log_context="novelty_judge",
+                        usage_metadata={"program_id": program.id},
                     )
                 )
 

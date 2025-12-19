@@ -4,8 +4,9 @@ OpenAI API interface for LLMs
 
 import asyncio
 import logging
+import os
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import openai
 
@@ -34,6 +35,7 @@ class OpenAILLM(LLMInterface):
         self.api_key = model_cfg.api_key
         self.random_seed = getattr(model_cfg, "random_seed", None)
         self.reasoning_effort = getattr(model_cfg, "reasoning_effort", None)
+        self.log_dir = os.environ.get("OPENEVOLVE_LOG_DIR")
 
         # Set up API client
         # OpenAI client requires max_retries to be int, not None
@@ -139,8 +141,9 @@ class OpenAILLM(LLMInterface):
 
         for attempt in range(retries + 1):
             try:
-                response = await asyncio.wait_for(self._call_api(params), timeout=timeout)
-                return response
+                content, usage = await asyncio.wait_for(self._call_api(params), timeout=timeout)
+                self._log_usage(usage, kwargs.get("log_context"), kwargs.get("usage_metadata"))
+                return content
             except asyncio.TimeoutError:
                 if attempt < retries:
                     logger.warning(f"Timeout on attempt {attempt + 1}/{retries + 1}. Retrying...")
@@ -158,15 +161,80 @@ class OpenAILLM(LLMInterface):
                     logger.error(f"All {retries + 1} attempts failed with error: {str(e)}")
                     raise
 
-    async def _call_api(self, params: Dict[str, Any]) -> str:
+    def _log_usage(
+        self,
+        usage: Optional[Dict[str, Any]],
+        log_context: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        if not usage:
+            return
+        try:
+            from openevolve.utils.tracking_utils import log_token_usage
+
+            log_token_usage(
+                model_name=self.model,
+                provider="openai",
+                usage=usage,
+                log_context=log_context,
+                metadata=metadata,
+                log_dir=self.log_dir,
+            )
+        except Exception:
+            logger.debug("Failed to log token usage", exc_info=True)
+
+    def _extract_usage(self, response: Any) -> Optional[Dict[str, Any]]:
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return None
+
+        def _maybe_get(obj: Any, key: str) -> Optional[Any]:
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return obj.get(key)
+            return getattr(obj, key, None)
+
+        prompt_tokens = _maybe_get(usage, "prompt_tokens")
+        completion_tokens = _maybe_get(usage, "completion_tokens")
+        total_tokens = _maybe_get(usage, "total_tokens")
+
+        completion_details = _maybe_get(usage, "completion_tokens_details")
+        prompt_details = _maybe_get(usage, "prompt_tokens_details")
+
+        accepted_prediction_tokens = _maybe_get(completion_details, "accepted_prediction_tokens")
+        reasoning_tokens = _maybe_get(completion_details, "reasoning_tokens")
+        rejected_prediction_tokens = _maybe_get(completion_details, "rejected_prediction_tokens")
+        cached_tokens = _maybe_get(prompt_details, "cached_tokens")
+        if cached_tokens is None:
+            cached_tokens = _maybe_get(prompt_details, "cache_read_input_tokens")
+
+        if total_tokens is None and isinstance(prompt_tokens, (int, float)) and isinstance(
+            completion_tokens, (int, float)
+        ):
+            total_tokens = prompt_tokens + completion_tokens
+
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "input_tokens": prompt_tokens,
+            "output_tokens": completion_tokens,
+            "accepted_prediction_tokens": accepted_prediction_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "rejected_prediction_tokens": rejected_prediction_tokens,
+            "cached_tokens": cached_tokens,
+        }
+
+    async def _call_api(self, params: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any]]]:
         """Make the actual API call"""
-        # Use asyncio to run the blocking API call in a thread pool
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None, lambda: self.client.chat.completions.create(**params)
         )
-        # Logging of system prompt, user message and response content
         logger = logging.getLogger(__name__)
         logger.debug(f"API parameters: {params}")
         logger.debug(f"API response: {response.choices[0].message.content}")
-        return response.choices[0].message.content
+
+        usage = self._extract_usage(response)
+        return response.choices[0].message.content, usage
